@@ -1,22 +1,15 @@
 import AppKit
 
-// `StayWake --status` prints the same values the menu shows and exits — a
-// drop-in replacement for the `wakestatus` shell function, and the easiest way
-// to check the pmset parsing without opening the menu.
+// `StayWake --status` prints what the menu shows and exits — a replacement for
+// the `wakestatus` shell function, and the easiest way to check state over SSH.
 if CommandLine.arguments.contains("--status") {
     let settings = PowerManager.read()
 
-    func minutes(_ value: Int?) -> String {
-        guard let value else { return "unknown" }
-        return value == 0 ? "never" : "\(value) min"
+    print(settings.headline)
+    for line in settings.details { print("  \(line)") }
+    if !PowerManager.isAuthorized {
+        print("  Switching needs your password (one-click setup not run)")
     }
-
-    print("SleepDisabled:   \(settings.sleepDisabled ? "1 (stays awake with the lid closed)" : "0 (sleeps when the lid closes)")")
-    print("Sleep:           \(minutes(settings.sleep))")
-    print("Disk sleep:      \(minutes(settings.diskSleep))")
-    print("Display sleep:   \(minutes(settings.displaySleep))")
-    print("Wake on network: \(settings.wakeOnNetwork.map { $0 ? "on" : "off" } ?? "unknown")")
-    print("Passwordless:    \(PowerManager.canElevateSilently ? "yes" : "no (helper not installed)")")
     exit(0)
 }
 

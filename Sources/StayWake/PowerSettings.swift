@@ -7,7 +7,7 @@ struct PowerSettings {
     /// lid closed. This is the setting the menu bar icon reflects.
     var sleepDisabled: Bool
 
-    // AC-power values, shown as detail lines in the menu.
+    // Values for the AC-power profile, described in the menu's submenu.
     var sleep: Int?
     var diskSleep: Int?
     var displaySleep: Int?
@@ -18,18 +18,62 @@ struct PowerSettings {
                                        wakeOnNetwork: nil)
 }
 
+// MARK: - Plain-English descriptions
+//
+// The menu and `--status` share this so the wording can never drift between
+// them. Nothing here exposes a pmset key name or a raw 0/1 — those mean
+// nothing to someone reading a menu.
+extension PowerSettings {
+    /// One line describing what closing the lid will do right now.
+    var headline: String {
+        sleepDisabled ? "Staying awake with the lid closed"
+                      : "Sleeps when you close the lid"
+    }
+
+    /// Short form for the icon's tooltip.
+    var tooltip: String {
+        sleepDisabled ? "StayWake — lid closed keeps the Mac awake"
+                      : "StayWake — lid closed lets the Mac sleep"
+    }
+
+    /// Current power behaviour, one sentence per setting. Values that could
+    /// not be read are omitted rather than shown as a placeholder.
+    var details: [String] {
+        var lines: [String] = []
+
+        if let sleep {
+            lines.append(sleep == 0 ? "Never sleeps when idle"
+                                    : "Sleeps after \(sleep) min idle")
+        }
+        if let displaySleep {
+            lines.append(displaySleep == 0 ? "Screen stays on"
+                                           : "Screen turns off after \(displaySleep) min")
+        }
+        if let diskSleep {
+            lines.append(diskSleep == 0 ? "Hard disks keep spinning"
+                                        : "Hard disks spin down after \(diskSleep) min")
+        }
+        if let wakeOnNetwork {
+            lines.append(wakeOnNetwork ? "Wakes for network access"
+                                       : "Ignores network access while asleep")
+        }
+
+        return lines
+    }
+}
+
 enum PowerManager {
     static let pmset = "/usr/bin/pmset"
     static let sudo = "/usr/bin/sudo"
 
     // The four argument vectors below are duplicated verbatim in
-    // scripts/staywake.sudoers. sudo matches on the exact argument list, so
-    // any edit here must be mirrored there or the passwordless path breaks.
-    static let enableArgs: [[String]] = [
+    // scripts/install-sudoers-rule.sh. sudo matches on the exact argument
+    // list, so any edit here must be mirrored there or switching breaks.
+    static let stayAwakeArgs: [[String]] = [
         ["-a", "disablesleep", "1"],
         ["-c", "sleep", "0", "disksleep", "0", "womp", "1"],
     ]
-    static let disableArgs: [[String]] = [
+    static let letSleepArgs: [[String]] = [
         ["-a", "disablesleep", "0"],
         ["-c", "sleep", "1", "disksleep", "10"],
     ]
@@ -79,16 +123,16 @@ enum PowerManager {
 
     // MARK: - Writing
 
-    /// True when the sudoers rule is installed, i.e. pmset can be driven
-    /// without a password prompt.
-    static var canElevateSilently: Bool {
-        Shell.run(sudo, ["-n", "-l", pmset] + enableArgs[0]).succeeded
+    /// True once /etc/sudoers.d/staywake is in place, i.e. the pmset commands
+    /// can run without a password prompt.
+    static var isAuthorized: Bool {
+        Shell.run(sudo, ["-n", "-l", pmset] + stayAwakeArgs[0]).succeeded
     }
 
     /// Applies the on/off preset. Returns nil on success, or a message
     /// describing the first command that failed.
-    static func apply(enabled: Bool) -> String? {
-        for args in (enabled ? enableArgs : disableArgs) {
+    static func apply(stayAwake: Bool) -> String? {
+        for args in (stayAwake ? stayAwakeArgs : letSleepArgs) {
             let result = Shell.run(sudo, ["-n", pmset] + args)
             guard result.succeeded else {
                 let detail = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)

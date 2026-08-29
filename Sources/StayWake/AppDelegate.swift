@@ -18,7 +18,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.delegate = self
         statusItem.menu = menu
 
-        refresh()
+        settings = PowerManager.read()
+        updateStatusItem()
+
         // The timer only needs the icon to be right; the full read happens when
         // the menu opens, so this stays a single cheap subprocess.
         refreshTimer = Timer.scheduledTimer(withTimeInterval: refreshInterval, repeats: true) { [weak self] _ in
@@ -32,116 +34,121 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         refreshTimer?.invalidate()
     }
 
-    // MARK: - State
-
-    private func refresh() {
-        settings = PowerManager.read()
-        updateStatusItem()
-    }
-
     private func updateStatusItem() {
         guard let button = statusItem.button else { return }
 
         let symbol = settings.sleepDisabled ? "bolt.fill" : "bolt.slash"
-        let label = settings.sleepDisabled
-            ? "StayWake: lid closed keeps the Mac awake"
-            : "StayWake: lid closed lets the Mac sleep"
-
-        let image = NSImage(systemSymbolName: symbol, accessibilityDescription: label)
+        let image = NSImage(systemSymbolName: symbol, accessibilityDescription: settings.tooltip)
         image?.isTemplate = true
         button.image = image
         // Never leave an invisible item in the menu bar if the symbol is missing.
         button.title = image == nil ? (settings.sleepDisabled ? "AWAKE" : "SLEEP") : ""
-        button.toolTip = label
+        button.toolTip = settings.tooltip
     }
 
     // MARK: - Menu
 
-    // Rebuilt on every open so the values shown are never stale.
+    // Rebuilt on every open so nothing shown is ever stale.
     func menuWillOpen(_ menu: NSMenu) {
-        refresh()
+        settings = PowerManager.read()
+        updateStatusItem()
+
+        let authorized = PowerManager.isAuthorized
         menu.removeAllItems()
 
-        let heading = settings.sleepDisabled ? "Staying awake with the lid closed" : "Sleeping when the lid closes"
-        menu.addItem(disabledItem(heading))
+        menu.addItem(headingItem(settings.headline))
         menu.addItem(.separator())
 
-        let toggle = NSMenuItem(
-            title: settings.sleepDisabled ? "Let It Sleep" : "Stay Awake",
-            action: #selector(toggleStayAwake),
-            keyEquivalent: ""
-        )
-        toggle.target = self
-        menu.addItem(toggle)
-        menu.addItem(.separator())
+        // A pair of checked options reads more clearly than one item whose
+        // title flips between two meanings.
+        menu.addItem(choiceItem("Stay Awake", selected: settings.sleepDisabled,
+                                action: #selector(chooseStayAwake)))
+        menu.addItem(choiceItem("Let It Sleep", selected: !settings.sleepDisabled,
+                                action: #selector(chooseLetSleep)))
 
-        for line in detailLines() {
-            menu.addItem(disabledItem(line))
-        }
-        menu.addItem(.separator())
-
-        if !PowerManager.canElevateSilently {
-            let install = NSMenuItem(
-                title: "Install Passwordless Helper…",
-                action: #selector(installHelper),
-                keyEquivalent: ""
-            )
-            install.target = self
-            menu.addItem(install)
+        if !settings.details.isEmpty {
+            menu.addItem(.separator())
+            let submenu = NSMenu()
+            for line in settings.details { submenu.addItem(captionItem(line)) }
+            let details = NSMenuItem(title: "On Power Adapter", action: nil, keyEquivalent: "")
+            details.submenu = submenu
+            menu.addItem(details)
         }
 
-        let launch = NSMenuItem(title: "Launch at Login", action: #selector(toggleLaunchAtLogin), keyEquivalent: "")
+        menu.addItem(.separator())
+
+        if !authorized {
+            let setUp = NSMenuItem(title: "Set Up One-Click Switching…",
+                                   action: #selector(installSudoersRule),
+                                   keyEquivalent: "")
+            setUp.target = self
+            menu.addItem(setUp)
+            menu.addItem(captionItem("Switching asks for your password until then"))
+        }
+
+        let launch = NSMenuItem(title: "Open at Login", action: #selector(toggleOpenAtLogin), keyEquivalent: "")
         launch.target = self
-        launch.state = launchesAtLogin ? .on : .off
+        launch.state = opensAtLogin ? .on : .off
         menu.addItem(launch)
+
+        menu.addItem(.separator())
 
         let quit = NSMenuItem(title: "Quit StayWake", action: #selector(quit), keyEquivalent: "q")
         quit.target = self
         menu.addItem(quit)
     }
 
-    private func disabledItem(_ title: String) -> NSMenuItem {
+    /// Bold, non-clickable line describing the current state.
+    private func headingItem(_ title: String) -> NSMenuItem {
         let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
-        item.isEnabled = false
+        item.attributedTitle = NSAttributedString(string: title, attributes: [
+            .font: NSFont.menuFont(ofSize: NSFont.systemFontSize).bold
+        ])
         return item
     }
 
-    /// The same values `wakestatus` prints, formatted for a menu.
-    private func detailLines() -> [String] {
-        func minutes(_ value: Int?) -> String {
-            guard let value else { return "—" }
-            return value == 0 ? "never" : "\(value) min"
-        }
-        return [
-            "SleepDisabled: \(settings.sleepDisabled ? "1" : "0")",
-            "Sleep: \(minutes(settings.sleep))",
-            "Disk sleep: \(minutes(settings.diskSleep))",
-            "Display sleep: \(minutes(settings.displaySleep))",
-            "Wake on network: \(settings.wakeOnNetwork.map { $0 ? "on" : "off" } ?? "—")",
-        ]
+    /// Small grey explanatory line.
+    private func captionItem(_ text: String) -> NSMenuItem {
+        let item = NSMenuItem(title: text, action: nil, keyEquivalent: "")
+        item.attributedTitle = NSAttributedString(string: text, attributes: [
+            .font: NSFont.menuFont(ofSize: NSFont.smallSystemFontSize),
+            .foregroundColor: NSColor.secondaryLabelColor,
+        ])
+        return item
+    }
+
+    private func choiceItem(_ title: String, selected: Bool, action: Selector) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+        item.target = self
+        item.state = selected ? .on : .off
+        return item
     }
 
     // MARK: - Actions
 
-    @objc private func toggleStayAwake() {
-        let target = !settings.sleepDisabled
+    @objc private func chooseStayAwake() { setStayAwake(true) }
+    @objc private func chooseLetSleep() { setStayAwake(false) }
 
-        guard PowerManager.canElevateSilently else {
-            presentHelperMissingAlert()
+    private func setStayAwake(_ stayAwake: Bool) {
+        guard stayAwake != settings.sleepDisabled else { return }
+
+        guard PowerManager.isAuthorized else {
+            offerSudoersRule()
             return
         }
 
-        if let failure = PowerManager.apply(enabled: target) {
+        if let failure = PowerManager.apply(stayAwake: stayAwake) {
             alert(style: .warning, title: "Could not change the sleep setting", message: failure)
         }
-        refresh()
+        settings = PowerManager.read()
+        updateStatusItem()
     }
 
-    @objc private func installHelper() {
-        guard let script = Bundle.main.path(forResource: "install-helper", ofType: "sh") else {
+    @objc private func installSudoersRule() {
+        guard let script = Bundle.main.path(forResource: "install-sudoers-rule", ofType: "sh") else {
             alert(style: .warning,
-                  title: "Installer missing",
-                  message: "install-helper.sh was not found inside the app bundle.")
+                  title: "Setup script missing",
+                  message: "install-sudoers-rule.sh was not found inside the app bundle.")
             return
         }
 
@@ -156,20 +163,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let code = errorInfo[NSAppleScript.errorNumber] as? Int ?? 0
             if code != -128 {
                 let detail = errorInfo[NSAppleScript.errorMessage] as? String ?? "Unknown error."
-                alert(style: .warning, title: "Helper installation failed", message: detail)
+                alert(style: .warning, title: "Setup failed", message: detail)
             }
             return
         }
 
         alert(style: .informational,
-              title: "Passwordless helper installed",
-              message: "Toggling no longer asks for your password.\n\n"
-                     + "Remove it any time with:\nsudo rm /etc/sudoers.d/staywake")
+              title: "One-click switching is on",
+              message: "Switching no longer asks for your password.\n\n"
+                     + "To undo this at any time, run:\nsudo rm /etc/sudoers.d/staywake")
     }
 
-    @objc private func toggleLaunchAtLogin() {
+    @objc private func toggleOpenAtLogin() {
         do {
-            if launchesAtLogin {
+            if opensAtLogin {
                 try SMAppService.mainApp.unregister()
             } else {
                 try SMAppService.mainApp.register()
@@ -178,11 +185,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             alert(style: .warning,
                   title: "Could not change the login item",
                   message: error.localizedDescription
-                         + "\n\nThis usually means the app is not in /Applications.")
+                         + "\n\nThis usually means StayWake is not in your Applications folder.")
         }
     }
 
-    private var launchesAtLogin: Bool {
+    private var opensAtLogin: Bool {
         SMAppService.mainApp.status == .enabled
     }
 
@@ -192,14 +199,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // MARK: - Alerts
 
-    private func presentHelperMissingAlert() {
+    /// Explains, in full, what the one-time setup actually installs. This is
+    /// the only privileged thing the app ever does, so it says so plainly
+    /// rather than asking for trust.
+    private func offerSudoersRule() {
         let response = alert(
             style: .informational,
-            title: "Passwordless helper not installed",
-            message: "StayWake needs a one-time sudoers rule to run pmset without a password prompt.",
-            buttons: ["Install…", "Cancel"]
+            title: "One-time setup needed",
+            message: """
+            Changing this setting requires administrator rights, so macOS would \
+            ask for your password every single time you switch.
+
+            To avoid that, StayWake can install a small permission file at \
+            /etc/sudoers.d/staywake. It lets your account run exactly four \
+            power-management commands — the ones behind Stay Awake and Let It \
+            Sleep — and nothing else. No background program is installed.
+
+            You will be asked for your password once, now.
+
+            To undo it later, run:
+            sudo rm /etc/sudoers.d/staywake
+            """,
+            buttons: ["Set Up…", "Not Now"]
         )
-        if response == .alertFirstButtonReturn { installHelper() }
+        if response == .alertFirstButtonReturn { installSudoersRule() }
     }
 
     @discardableResult
@@ -227,5 +250,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")
         return "\"\(escaped)\""
+    }
+}
+
+private extension NSFont {
+    var bold: NSFont {
+        NSFontManager.shared.convert(self, toHaveTrait: .boldFontMask)
     }
 }

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Removes the StayWake sudoers rule.  sudo ./scripts/uninstall-helper.sh
+# Removes the StayWake sudoers rule.  sudo ./scripts/remove-sudoers-rule.sh
 set -euo pipefail
 
 if [[ $EUID -ne 0 ]]; then

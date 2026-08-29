@@ -1,6 +1,6 @@
 #!/bin/bash
 # Installs the sudoers rule that lets StayWake run pmset without a password.
-# Must run as root:  sudo ./scripts/install-helper.sh [username]
+# Must run as root:  sudo ./scripts/install-sudoers-rule.sh [username]
 set -euo pipefail
 
 SUDOERS_FILE=/etc/sudoers.d/staywake
